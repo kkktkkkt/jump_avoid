@@ -112,9 +112,9 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
 
         frameCount++
         score = frameCount / 10
-        speed = BASE_SPEED + frameCount * 0.000004f
+        speed = BASE_SPEED + frameCount * 0.000010f
 
-        val spawnEvery = max(35, 90 - frameCount / 80)
+        val spawnEvery = max(18, 85 - frameCount / 40)
         if (frameCount % spawnEvery == 0) {
             obstacles.add(Obstacle((0..2).random()))
         }
@@ -183,7 +183,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         stickFigure.draw(canvas, vpX, vpY, screenH, roadHalfW)
 
         // HUD
-        canvas.drawText("SCORE  $score", 36f, 72f, scorePaint)
+        val level = score / 50 + 1
+        canvas.drawText("SCORE  $score   LV $level", 36f, 72f, scorePaint)
     }
 
     // --- Game loop thread ---
