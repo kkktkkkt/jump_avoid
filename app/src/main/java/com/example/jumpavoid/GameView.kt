@@ -18,18 +18,30 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
 
     @Volatile private var isGameOver = false
     @Volatile private var resetRequested = false
+    @Volatile private var isWaitingForStart = true
+
     private var speed = BASE_SPEED
+    private var speedOffset = 0f
     private var frameCount = 0
+
+    // Level-up display
+    private var currentLevel = 1
+    private var levelUpFramesLeft = 0
+    private var levelUpText = ""
+    private val LEVEL_UP_FRAMES = 120
 
     private var screenW = 0f
     private var screenH = 0f
-    private var vpX = 0f      // vanishing point X (screen center)
-    private var vpY = 0f      // vanishing point Y (upper area)
+    private var vpX = 0f
+    private var vpY = 0f
     private var roadHalfW = 0f
 
     var onGameOver: (() -> Unit)? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gameThread: GameThread? = null
+
+    // Sound
+    private val stepSound = StepSound()
 
     // --- Paints ---
     private val bgPaint = Paint().apply { color = Color.rgb(18, 22, 38) }
@@ -62,8 +74,17 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         isAntiAlias = true
         typeface = Typeface.DEFAULT_BOLD
     }
+    private val levelUpPaint = Paint().apply {
+        textSize = 86f
+        isAntiAlias = true
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+    }
 
-    init { holder.addCallback(this) }
+    init {
+        holder.addCallback(this)
+        stickFigure.onStep = { stepSound.play() }
+    }
 
     // --- Surface lifecycle ---
 
@@ -82,16 +103,27 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         gameThread?.let { it.running = false; it.join() }
         gameThread = null
+        stepSound.release()
     }
 
     // --- Public controls (called from UI thread) ---
 
-    fun moveLeft()  { if (!isGameOver) stickFigure.moveLeft() }
-    fun moveRight() { if (!isGameOver) stickFigure.moveRight() }
+    fun moveLeft()  { if (!isGameOver && !isWaitingForStart) stickFigure.moveLeft() }
+    fun moveRight() { if (!isGameOver && !isWaitingForStart) stickFigure.moveRight() }
 
     fun reset() {
         isGameOver = false
         resetRequested = true
+    }
+
+    fun startAtLevel(level: Int) {
+        frameCount = 0
+        score = 0
+        speedOffset = (level - 1) * 0.010f
+        speed = BASE_SPEED + speedOffset
+        currentLevel = level          // prevent immediate level-up fire
+        levelUpFramesLeft = 0
+        isWaitingForStart = false
     }
 
     // --- Game logic (called from game thread) ---
@@ -100,21 +132,34 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         obstacles.clear()
         score = 0
         speed = BASE_SPEED
+        speedOffset = 0f
         frameCount = 0
+        currentLevel = 1
+        levelUpFramesLeft = 0
         stickFigure.reset()
         resetRequested = false
+        isWaitingForStart = true
     }
 
     private fun update() {
         if (screenW == 0f) return
         if (resetRequested) { handleReset(); return }
-        if (isGameOver) return
+        if (isWaitingForStart || isGameOver) return
 
         frameCount++
         score = frameCount / 10
-        speed = BASE_SPEED + frameCount * 0.000010f
+        speed = BASE_SPEED + speedOffset + frameCount * 0.000010f
 
-        val spawnEvery = max(18, 85 - frameCount / 40)
+        // Level-up detection
+        val newLevel = score / 50 + 1
+        if (newLevel > currentLevel) {
+            currentLevel = newLevel
+            levelUpFramesLeft = LEVEL_UP_FRAMES
+            levelUpText = "LEVEL UP!  LV $currentLevel"
+        }
+        if (levelUpFramesLeft > 0) levelUpFramesLeft--
+
+        val spawnEvery = max(18, 85 - frameCount / 40 - (currentLevel - 1) * 5)
         if (frameCount % spawnEvery == 0) {
             obstacles.add(Obstacle((0..2).random()))
         }
@@ -141,11 +186,10 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     }
 
     private fun render(canvas: Canvas) {
-        // Background
         canvas.drawRect(0f, 0f, screenW, screenH, bgPaint)
         if (screenW == 0f) return
 
-        // Road fill (trapezoid converging at vanishing point)
+        // Road fill (trapezoid)
         val path = Path()
         path.moveTo(vpX, vpY)
         path.lineTo(vpX - roadHalfW, screenH)
@@ -153,7 +197,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         path.close()
         canvas.drawPath(path, roadPaint)
 
-        // Scrolling horizontal grid lines (creates movement illusion)
+        // Scrolling horizontal grid lines
         val gridStep = 1f / 10f
         val scrollFrac = (frameCount * speed * 3.5f) % gridStep
         var d = gridStep + scrollFrac
@@ -164,12 +208,12 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
             d += gridStep
         }
 
-        // Lane dividers (4 lines radiating from vanishing point)
+        // Lane dividers
         for (xFactor in listOf(-1f, -1f / 3f, 1f / 3f, 1f)) {
             canvas.drawLine(vpX, vpY, vpX + xFactor * roadHalfW, screenH, lanePaint)
         }
 
-        // Obstacles (drawn back-to-front so nearer ones appear on top)
+        // Obstacles (back-to-front)
         for (o in obstacles.sortedBy { it.depth }) {
             val ox = o.screenX(vpX, roadHalfW)
             val oy = o.screenY(vpY, screenH)
@@ -179,12 +223,23 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
             canvas.drawRect(ox - hw, oy - oh, ox + hw, oy, obsRimPaint)
         }
 
-        // Stick figure
+        // Character
         stickFigure.draw(canvas, vpX, vpY, screenH, roadHalfW)
 
-        // HUD
-        val level = score / 50 + 1
-        canvas.drawText("SCORE  $score   LV $level", 36f, 72f, scorePaint)
+        // HUD: score + level
+        canvas.drawText("SCORE  $score   LV $currentLevel", 36f, 72f, scorePaint)
+
+        // Level-up notification (fading)
+        if (levelUpFramesLeft > 0) {
+            val alpha = (levelUpFramesLeft * 255 / LEVEL_UP_FRAMES).coerceIn(0, 255)
+            val textY = screenH * 0.42f
+            // Shadow pass
+            levelUpPaint.color = Color.argb(alpha / 2, 0, 0, 0)
+            canvas.drawText(levelUpText, vpX + 3f, textY + 3f, levelUpPaint)
+            // Gold text
+            levelUpPaint.color = Color.argb(alpha, 255, 215, 0)
+            canvas.drawText(levelUpText, vpX, textY, levelUpPaint)
+        }
     }
 
     // --- Game loop thread ---
